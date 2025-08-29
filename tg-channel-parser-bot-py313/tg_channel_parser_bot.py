@@ -239,7 +239,6 @@ async def ask_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Период: напиши либо число дней (например, 30), либо даты:\n"
             "• '2025-08-01 2025-08-27' или 'с 2025-08-01 по 2025-08-27'\n"
-            f"По умолчанию — последние {DEFAULT_DAYS} дней."
         )
         return PERIOD
     except ValueError as e:
@@ -252,8 +251,8 @@ async def ask_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["period"] = (start, end)
     human = f"{start.date()} — { (end - timedelta(days=1)).date() }"
     await update.message.reply_text(
-        f"Ок! Период: {human}\nТеперь пришли ключевые слова (через запятую). "
-        "Если оставить пустым — соберу все посты за период."
+        f"Ок! Период: {human}\n Чтобы получить все новости за заданный период - отправь мне запятую "," в ответ на это сообщение. 
+Если хочешь сделать поиск по кодовым словам - направь мне кодовые слова через запятую."
     )
     return KEYWORDS
 
