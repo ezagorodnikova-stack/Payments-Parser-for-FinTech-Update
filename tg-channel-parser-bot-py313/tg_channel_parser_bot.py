@@ -1,24 +1,25 @@
 # tg_channel_parser_bot.py
-# Меню из двух режимов:
+# ДВА РЕЖИМА:
 # 1) «Парсинг тг каналов» — читает канал через Telethon, фильтрует по датам и ключам и делает HTML (первые 2 абзаца поста).
-# 2) «Парсинг сайтов» — ВСТРОЕННЫЙ парсер (RSS/Atom/sitemaps). Теперь тоже формирует HTML-отчёт с карточками.
+# 2) «Парсинг сайтов» — ВСТРОЕННЫЙ парсер (RSS/Atom/sitemaps). Пользователь ВВОДИТ ТОЛЬКО ССЫЛКИ НА САЙТЫ (без пресетов),
+#    выбирает период, и на выходе получает красивый HTML, где у каждого материала показываются первые два абзаца описания.
 #
-# Совместим с Python 3.13. Для Bot API используем certifi, чтобы избежать TLS-ошибок.
+# Совместим с Python 3.13.
 #
-# Требуется .env:
+# .env:
 #   BOT_TOKEN=...
 #   API_ID=...
 #   API_HASH=...
 #   TELETHON_SESSION=...
 #
-# Зависимости (requirements):
+# Требуемые пакеты (requirements.txt):
 #   python-telegram-bot==21.6
 #   telethon==1.36.0
 #   python-dotenv==1.0.1
 #   jinja2==3.1.4
 #   beautifulsoup4==4.12.3
-#   certifi>=2024.2.2
-#   httpx>=0.27,<0.29   # для совместимости с PTB 21.x
+#   certifi>=2024.7.4
+#   httpx>=0.27,<0.29
 
 import os
 import re
@@ -27,7 +28,6 @@ import csv
 import shlex
 import asyncio
 import logging
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Tuple, Optional, Set, Dict
@@ -59,11 +59,9 @@ logging.basicConfig(
 log = logging.getLogger("parser-bot")
 
 # ---------- СОСТОЯНИЯ ----------
-(
-    MENU,                 # главное меню
-    LINK, PERIOD, KEYWORDS,          # ветка ТГ
-    SITE_MODE, SITE_SITES, SITE_PERIOD, SITE_CONFIRM  # ветка сайты
-) = range(8)
+# ТГ-ветка: LINK -> PERIOD -> KEYWORDS
+# Сайты: SITE_SITES -> SITE_PERIOD -> SITE_CONFIRM
+(MENU, LINK, PERIOD, KEYWORDS, SITE_SITES, SITE_PERIOD, SITE_CONFIRM) = range(7)
 
 # ---------- КОНФИГ ----------
 load_dotenv()
@@ -168,7 +166,7 @@ HTML_TEMPLATE_SITES = Template("""
 </html>
 """.strip())
 
-# ---------- ВСТРОЕННЫЙ ПАРСЕР САЙТОВ (stdlib RSS/Atom/sitemaps) ----------
+# ---------- ВСТРОЕННЫЙ ПАРСЕР САЙТОВ (исправленное парсирование дат + accept-undated) ----------
 EMBEDDED_SITE_PARSER_NAME = "embedded_site_parser.py"
 EMBEDDED_SITE_PARSER_CODE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -196,7 +194,7 @@ def to_iso(dt):
 def parse_date_guess(s: str):
     s = (s or "").strip()
     if not s: return None
-    try: return parsedate_to_datetime(s)
+    try: return parsedate_to_datetime(s)  # RFC-2822
     except Exception: pass
     for pat in [r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?Z?$",
                 r"^\d{4}/\d{2}/\d{2}$",
@@ -208,6 +206,23 @@ def parse_date_guess(s: str):
                 return datetime.fromisoformat(s2)
             except Exception: pass
     return None
+
+def parse_date_or_default(s: Optional[str], default_dt):
+    """Надёжно парсим дату периода: RFC-2822 или ISO, иначе default_dt."""
+    if not s:
+        return default_dt
+    s = s.strip()
+    try:
+        return parsedate_to_datetime(s)
+    except Exception:
+        pass
+    try:
+        s2 = s.replace("/", "-").replace("T", " ").replace("Z", "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}$", s2):
+            return datetime.fromisoformat(s2).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(s2)
+    except Exception:
+        return default_dt
 
 def ensure_dir(p): os.makedirs(p, exist_ok=True)
 
@@ -317,19 +332,18 @@ def write_csv(rows: List[Dict[str, str]], path: str):
 
 def run(sites: List[str], days: Optional[int], start: Optional[str], end: Optional[str],
         throttle: float = 0.6, accept_undated=False, max_items=1000, verbose=False,
-        add_presets=False, cafile: Optional[str] = None, insecure=False,
-        out_dir: str = "output"):
+        cafile: Optional[str] = None, insecure=False, out_dir: str = "output"):
     global SSL_CONTEXT
     if insecure: SSL_CONTEXT = ssl._create_unverified_context()
     else:
         SSL_CONTEXT = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
-    end_dt = parsedate_to_datetime(end) if end else datetime.now(timezone.utc)
-    start_dt = (end_dt - timedelta(days=days)) if (days is not None and not start) else (parsedate_to_datetime(start) if start else end_dt - timedelta(days=30))
-    if add_presets:
-        sites = (sites or []) + ["https://www.finextra.com/rss/latestnews.aspx",
-                                 "https://techcrunch.com/category/fintech/feed/",
-                                 "https://www.pymnts.com/feed/",
-                                 "https://thepaypers.com/rss"]
+
+    end_dt = parse_date_or_default(end, datetime.now(timezone.utc))
+    if days is not None and (not start and not end):
+        start_dt = end_dt - timedelta(days=days)
+    else:
+        start_dt = parse_date_or_default(start, end_dt - timedelta(days=30))
+
     sites_norm = []
     for s in (sites or []):
         s = s.strip()
@@ -348,7 +362,7 @@ def run(sites: List[str], days: Optional[int], start: Optional[str], end: Option
     write_csv(all_rows, os.path.join(out_dir, "all_sites.csv"))
 '''
 
-# ---------- Утилиты общего назначения ----------
+# ---------- Общие утилиты ----------
 def parse_channel_identifier(raw: str) -> str:
     raw = raw.strip()
     m = re.search(r"(?:t\.me/|@)([A-Za-z0-9_]{3,})/?$", raw)
@@ -413,7 +427,8 @@ def render_html_tg(channel_name: str, period_str: str, chips: List[str], posts: 
         channel_name=channel_name,
         period_str=period_str,
         chips=chips,
-        posts=posts
+        posts=posts,
+        total=len(posts),
     )
 
 def render_html_sites(period_str: str, sources_chips: List[str], posts: List[dict]) -> str:
@@ -421,7 +436,8 @@ def render_html_sites(period_str: str, sources_chips: List[str], posts: List[dic
         title="Сайты — подборка",
         period_str=period_str,
         chips=sources_chips,
-        posts=posts
+        posts=posts,
+        total=len(posts),
     )
 
 def safe_filename(s: str) -> str:
@@ -433,12 +449,6 @@ def user_workdir(user_id: int) -> Path:
     d = WORK_ROOT / f"user_{user_id}"
     (d / "output").mkdir(parents=True, exist_ok=True)
     return d
-
-def list_files_recursive(root: Path) -> Set[Path]:
-    files = set()
-    for p in root.rglob("*"):
-        if p.is_file(): files.add(p.resolve())
-    return files
 
 def ensure_embedded_script_on_disk(workdir: Path) -> Path:
     script_path = workdir / EMBEDDED_SITE_PARSER_NAME
@@ -460,13 +470,6 @@ async def run_site_script(args_list: List[str], workdir: Path, timeout_sec: int 
         return 124, "", "Timeout while running embedded site parser"
     return proc.returncode, stdout_b.decode("utf-8", errors="ignore"), stderr_b.decode("utf-8", errors="ignore")
 
-def site_mode_keyboard() -> InlineKeyboardMarkup:
-    kb = [
-        [InlineKeyboardButton("🧰 Использовать пресеты", callback_data="site:presets")],
-        [InlineKeyboardButton("✍️ Указать свои сайты", callback_data="site:custom")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
 def site_confirm_keyboard() -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("▶️ Запустить", callback_data="site:run")],
@@ -486,10 +489,13 @@ def norm_urls_from_text(text: str) -> List[str]:
     return out
 
 def build_site_args_from_context(ctx_ud: Dict) -> List[str]:
+    """Строим аргументы для ВСТРОЕННОГО парсера (без пресетов). Всегда включаем --accept-undated."""
     args: List[str] = []
-    if ctx_ud.get("site_use_presets"): args.append("--presets")
+
     urls: List[str] = ctx_ud.get("site_urls") or []
-    if urls: args += ["--sites", ",".join(urls)]
+    if urls:
+        args += ["--sites", ",".join(urls)]
+
     text_period: str = ctx_ud.get("site_period_text", "") or ""
     if re.fullmatch(r"\d{1,4}", text_period.strip()):
         args += ["--days", text_period.strip()]
@@ -501,12 +507,20 @@ def build_site_args_from_context(ctx_ud: Dict) -> List[str]:
             args += ["--start", dates[0]]
         else:
             args += ["--days", str(DEFAULT_DAYS)]
+
+    # ВАЖНО: брать элементы без даты тоже
+    args += ["--accept-undated"]
+
+    # Дефолтный вывод и немного ограничений/диагностики
     args += ["--out", "output"]
+
+    # TLS trust
     try:
         import certifi
         args += ["--cafile", certifi.where()]
     except Exception:
         pass
+
     return args
 
 def read_all_sites_csv(out_dir: Path) -> List[Dict[str, str]]:
@@ -543,7 +557,6 @@ def site_rows_to_posts(rows: List[Dict[str, str]]) -> List[dict]:
     for i, r in enumerate(rows_sorted, start=1):
         summary_html = first_paragraphs_html(r.get("summary",""), n=2)
         dt_disp = r.get("date","")
-        # Красивый вид даты, если возможно
         try:
             if dt_disp:
                 dt = parse_dt(dt_disp)
@@ -584,14 +597,14 @@ async def menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return LINK
     elif choice == "menu:site":
-        context.user_data.pop("site_use_presets", None)
-        context.user_data.pop("site_urls", None)
-        context.user_data.pop("site_period_text", None)
+        # Только ввод ссылок от пользователя — без пресетов
         await query.edit_message_text(
-            "Режим: Парсинг сайтов.\nВыбери источник сайтов:",
-            reply_markup=site_mode_keyboard()
+            "Режим: Парсинг сайтов.\n"
+            "Пришли ссылки на сайты (через пробел/запятую), например:\n"
+            "https://finextra.com https://techcrunch.com\n\n"
+            "Можно также прислать .txt-файл (одна ссылка в строке)."
         )
-        return SITE_MODE
+        return SITE_SITES
     else:
         await query.edit_message_text("Неизвестный выбор. Используй /start.")
         return ConversationHandler.END
@@ -696,35 +709,7 @@ async def run_parse_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Произошла ошибка: {e}")
     return ConversationHandler.END
 
-# ---------- Ветка «Сайты»: диалог и HTML-отчёт ----------
-async def site_mode_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "site:presets":
-        context.user_data["site_use_presets"] = True
-        context.user_data["site_urls"] = []
-        await query.edit_message_text(
-            "Ок! Используем пресеты 🔧\n"
-            "Теперь укажи период (как для ТГ):\n"
-            f"• число дней, например `30`\n"
-            f"• или даты: `2025-08-01 2025-08-27`\n"
-            f"Если оставить пусто — возьму по умолчанию {DEFAULT_DAYS} дней.",
-            parse_mode="Markdown"
-        )
-        return SITE_PERIOD
-    elif query.data == "site:custom":
-        context.user_data["site_use_presets"] = False
-        await query.edit_message_text(
-            "Пришли сайты:\n"
-            "• ссылки через пробел/запятую (напр.: https://finextra.com https://techcrunch.com)\n"
-            "• или .txt-файл (одна ссылка в строке).\n\n"
-            "После этого попрошу период."
-        )
-        return SITE_SITES
-    else:
-        await query.edit_message_text("Неверный выбор. /start — чтобы начать заново.")
-        return ConversationHandler.END
-
+# ---------- Ветка «Сайты»: только ссылки -> период -> запуск, HTML на выходе ----------
 async def site_collect_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     workdir = user_workdir(user_id)
@@ -773,11 +758,10 @@ async def site_collect_period(update: Update, context: ContextTypes.DEFAULT_TYPE
     start_dt, end_dt = parse_period(text)
     human = f"{start_dt.date()} — {(end_dt - timedelta(days=1)).date()}"
     urls = context.user_data.get("site_urls") or []
-    use_presets = bool(context.user_data.get("site_use_presets"))
 
     summary = [
         "Проверь параметры 👇",
-        f"• Источники: {'пресеты' if use_presets else (str(len(urls)) + ' сайт(ов)')}",
+        f"• Источники: {len(urls)} сайт(ов)",
         f"• Период: {human}",
         "Запустить парсинг?"
     ]
@@ -800,7 +784,7 @@ async def site_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("Запускаю парсер сайтов… Это может занять немного времени.")
 
-    # Запуск парсера (пишет CSV в workdir/output/)
+    # Запуск встроенного парсера (пишет CSV в workdir/output/)
     rc, out, err = await run_site_script(args_list, workdir)
 
     # Сбор данных и генерация HTML
@@ -845,6 +829,7 @@ async def on_stop(app: Application):
         await tg_client.disconnect()
 
 def build_application() -> Application:
+    # Стабильный TLS через certifi
     try:
         import certifi
         from telegram.request import HTTPXRequest
@@ -879,8 +864,7 @@ def main():
             LINK:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_period)],
             PERIOD:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_keywords)],
             KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, run_parse_tg)],
-            # Сайты
-            SITE_MODE:   [CallbackQueryHandler(site_mode_choose, pattern=r"^site:(presets|custom)$")],
+            # Сайты (без пресетов)
             SITE_SITES:  [MessageHandler((filters.Document.ALL | (filters.TEXT & ~filters.COMMAND)), site_collect_sites)],
             SITE_PERIOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, site_collect_period)],
             SITE_CONFIRM:[CallbackQueryHandler(site_confirm, pattern=r"^site:(run|cancel)$")],
