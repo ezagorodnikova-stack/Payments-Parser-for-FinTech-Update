@@ -3,4 +3,5 @@ telethon==1.36.0
 python-dotenv==1.0.1
 jinja2==3.1.4
 beautifulsoup4==4.12.3
-# htmlmin удалён для совместимости с Python 3.13
+certifi>=2024.2.2
+httpx>=0.27,<0.29
