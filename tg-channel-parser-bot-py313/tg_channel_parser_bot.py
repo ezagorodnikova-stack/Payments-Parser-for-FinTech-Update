@@ -251,8 +251,8 @@ async def ask_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["period"] = (start, end)
     human = f"{start.date()} — { (end - timedelta(days=1)).date() }"
     await update.message.reply_text(
-        f"Ок! Период: {human}\n Чтобы получить все новости за заданный период - отправь мне запятую в ответ на это сообщение. 
-Если хочешь сделать поиск по кодовым словам - направь мне кодовые слова через запятую."
+        f"""Ок! Период: {human}\n Чтобы получить все новости за заданный период - отправь мне запятую в ответ на это сообщение. 
+Если хочешь сделать поиск по кодовым словам - направь мне кодовые слова через запятую."""
     )
     return KEYWORDS
 
